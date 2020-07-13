@@ -1,68 +1,101 @@
+# MNIST 手写数字识别
 import torch
-import matplotlib.pyplot as plt
+import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
+from torchvision import datasets, transforms
+import torch.utils.data
 
-# create data
-n_data = torch.ones(100, 2)  # 输出100行两列的值全部都是1的张量
-# 类别1的数据
-x0 = torch.normal(2 * n_data, 1)  # 输出一个shape为[100,2]的矩阵，均值是2*n_data,标准差是1
-# 类别1的表签
-y0 = torch.zeros(100)
-# 类别2的数据
-x1 = torch.normal(-2 * n_data, 1)
-# 类别2的标签
-y1 = torch.ones(100)
+# 超参数定义
+BATCH_SIZE = 512
+EPOCHS = 20
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # 让torch判断是否使用cuda
+# train Data
+train_loader = torch.utils.data.DataLoader(
+    datasets.MNIST('mnist_data', train=True, download=True,
+                   transform=transforms.Compose(
+                       [transforms.ToTensor(),
+                        transforms.Normalize((0.1307,), (0.3081,))]
+                   )),
+    batch_size=BATCH_SIZE, shuffle=True)
 
-# print(2*n_data)
-# print(y0)
-# print(-2*n_data)
-# print(y1)
-# plt.hist(x0)
-# plt.show()
+# test data
+test_loader = torch.utils.data.DataLoader(
+    datasets.MNIST('mnist_data', train=False, download=False,
+                   transform=transforms.Compose([
+                       transforms.ToTensor(),
+                       transforms.Normalize((0.1307,), (0.3081,))
+                   ])),
+    batch_size=BATCH_SIZE, shuffle=True)
 
 
-x = torch.cat((x0, x1), 0).type(torch.FloatTensor)
-y = torch.cat((y0, y1), ).type(torch.LongTensor)
+# 卷积网络定义
+class convNet(nn.Module):
+    def __init__(self):
+        super(convNet, self).__init__()
+        # batch*1*28*28 每次会送入batch个样本，通道数是1（黑白图像），大小是28*28
+        self.conv1 = nn.Conv2d(1, 10, 5)
+        # 输入通道是1，输出通道10，卷积核5
+        self.conv2 = nn.Conv2d(10, 20, 3)
+        # input10,output20,conv3
 
-
-# 构建网络
-class Net(torch.nn.Module):
-    def __init__(self, n_feature, n_hidden, n_out):
-        super(Net, self).__init__()
-        self.hidden = torch.nn.Linear(n_feature, n_hidden)
-        self.out = torch.nn.Linear(n_hidden, n_out)
+        self.fc1 = nn.Linear(20 * 10 * 10, 500)
+        self.fc2 = nn.Linear(500, 10)
 
     def forward(self, x):
-        x = F.relu(self.hidden(x))
-        x = self.out(x)
-        return x
+        in_size = x.size(0)
+        # in_size=512  输入的x 可以看成是512*1*28*28的张量
+        out = self.conv1(x)  # batch*1*28*28--->batch*10*24*24
+        out = F.relu(out)
+        out = F.max_pool2d(out, 2)  # batch*10*24*24--->batch*10*12*12
+        out = self.conv2(out)  # batch*10*12*12--->batch*20*10*10
+        out = F.relu(out)
+        out = out.view(in_size, -1)  # batch*20*10*10--->batch*2000  (-1  说明是自动推算，本例中中是20*10*10)
+        out = self.fc1(out)
+        out = F.relu(out)
+        out = self.fc2(out)
+        out = F.log_softmax(out, dim=1)  # 计算log(softmax(x))
+        return out
 
+model = convNet().to(DEVICE)
+optimizer = optim.Adam(model.parameters())
 
-net = Net(n_feature=2, n_hidden=10, n_out=2)
-print(net)
+# define train function
+def train(model, device, train_loader, optimizer, epoch):
+    model.train()
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(DEVICE), target.to(DEVICE)
+        optimizer.zero_grad()
+        output = model(data)
+        loss = F.nll_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        if (batch_idx + 1) % 30 == 0:
+            print('train epoch:{} [{}/{} ({:.0f}%)]\tLoss:{:.6f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                       100. * batch_idx / len(train_loader), loss.item()
+            ))
 
-optimizer = torch.optim.SGD(net.parameters(), lr=0.02)
-loss_func = torch.nn.CrossEntropyLoss()
+# define test function
+def test(model, device, test_loader):
+    model.eval()
+    test_loss = 0
+    correct = 0
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            test_loss += F.nll_loss(output, target, reduction='sum').item()  # 将一批的损失相加
+            pred = output.max(1, keepdim=True)[1]  # 找到概率最大的下标
+            correct += pred.eq(target.view_as(pred)).sum().item()
 
-plt.ion()
+    test_loss /= len(test_loader.dataset)
+    print('\nTest set:Average loss:{:.4f},Accuarcy:{}/{}({:.0f}%)\n'.format(
+        test_loss, correct, len(test_loader.dataset),
+        100. * correct / len(test_loader.dataset)
+    ))
 
-for i in range(100):
-    out = net.forward(x)
-    loss = loss_func(out, y)
-
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    if i % 2 == 0:
-        plt.cla()
-        prediction = torch.max(F.softmax(out), 1)[1]
-        pred_y = prediction.data.numpy()
-        target_y = y.data.numpy()
-        plt.scatter(x.x.data.numpy()[:, 0], x.data.numpy()[:, 1], c=pred_y, s=100, lw=0, cmap='RdYlGn')
-        accuracy = float((pred_y == target_y).astype(int).sum()) / float(target_y.size)
-        plt.text(1.5, -4, 'accuracy=%.2f' % accuracy, fontdict={'size': 20, 'color': 'red'})
-        plt.pause(0.1)
-
-plt.ioff()
-plt.show()
+# training
+for epoch in range(1, EPOCHS + 1):
+    train(model, DEVICE, train_loader, optimizer, epoch)
+    test(model, DEVICE, test_loader)
